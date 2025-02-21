@@ -1,0 +1,122 @@
+import serial
+import pyautogui
+import time
+
+# Configure PyAutoGUI settings
+pyautogui.FAILSAFE = True
+pyautogui.PAUSE = 0.1
+
+# Set up serial connection
+SERIAL_PORT = 'IMPORTSERIALCONNECTION'
+BAUD_RATE = 9600
+
+# Enhanced control settings with reduced rotation sensitivity
+SENSITIVITY = 200  # Increased to reduce overall movement
+DEAD_ZONE = 1000
+MICRO_DEAD_ZONE = 500
+SMOOTHING_FACTOR = 0.7
+ROTATION_SCALE = 0.3  # Additional scaling factor for rotational movements
+
+# Initialize smoothing variables
+last_delta_x = 0
+last_delta_y = 0
+
+
+def map_value(value, in_min, in_max, out_min, out_max):
+    return (value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
+
+
+def smooth_movement(new_value, last_value, smoothing_factor):
+    """Apply exponential smoothing to movement"""
+    return (smoothing_factor * last_value) + ((1 - smoothing_factor) * new_value)
+
+
+def process_serial_data(line):
+    try:
+        parts = line.decode().strip().split('\t')
+        ax = int(parts[0].split(': ')[1])
+        ay = int(parts[1].split(': ')[1])
+        return ax, ay
+    except (ValueError, IndexError) as e:
+        print(f"Error parsing data: {e}")
+        return None, None
+
+
+def apply_dead_zone(value, major_dead_zone, micro_dead_zone):
+    """
+    Apply two-stage dead zone with additional rotation scaling
+    """
+    if abs(value) < micro_dead_zone:
+        return 0
+    elif abs(value) < major_dead_zone:
+        # Significantly reduce movements in the intermediate zone
+        scaling = (abs(value) - micro_dead_zone) / (major_dead_zone - micro_dead_zone)
+        return (value / abs(value)) * scaling * (abs(value) / 8)  # Increased division factor
+
+    # Apply additional rotation scaling to larger movements
+    scaled_value = value * ROTATION_SCALE
+    # Add non-linear scaling for larger movements
+    if abs(scaled_value) > major_dead_zone:
+        scaled_value = scaled_value * (major_dead_zone / abs(scaled_value))
+    return scaled_value
+
+
+def main():
+    global last_delta_x, last_delta_y
+
+    try:
+        ser = serial.Serial(SERIAL_PORT, BAUD_RATE)
+        print(f"Connected to Arduino on {SERIAL_PORT}")
+
+        screen_width, screen_height = pyautogui.size()
+        current_x, current_y = pyautogui.position()
+
+        while True:
+            if ser.in_waiting:
+                line = ser.readline()
+                ax, ay = process_serial_data(line)
+
+                if ax is not None and ay is not None:
+                    # Apply dead zones and get raw movement with reduced sensitivity
+                    raw_delta_x = -apply_dead_zone(ax, DEAD_ZONE, MICRO_DEAD_ZONE) / SENSITIVITY
+                    raw_delta_y = apply_dead_zone(ay, DEAD_ZONE, MICRO_DEAD_ZONE) / SENSITIVITY
+
+                    # Smooth the movement
+                    delta_x = smooth_movement(raw_delta_x, last_delta_x, SMOOTHING_FACTOR)
+                    delta_y = smooth_movement(raw_delta_y, last_delta_y, SMOOTHING_FACTOR)
+
+                    # Only move if there's significant movement after smoothing
+                    if abs(delta_x) > 0.01 or abs(delta_y) > 0.01:
+                        # Apply additional movement dampening
+                        new_x = current_x + (delta_x * (1 - abs(delta_x) / 2))  # Reduce sensitivity at extremes
+                        new_y = current_y + (delta_y * (1 - abs(delta_y) / 2))
+
+                        # Ensure we stay within screen boundaries
+                        new_x = max(0, min(new_x, screen_width))
+                        new_y = max(0, min(new_y, screen_height))
+
+                        # Move mouse
+                        pyautogui.moveTo(new_x, new_y)
+
+                        # Update current position and last deltas
+                        current_x, current_y = new_x, new_y
+                        last_delta_x, last_delta_y = delta_x, delta_y
+
+                        print(f"Mouse Position: ({int(new_x)}, {int(new_y)})")
+
+            time.sleep(0.01)
+
+    except serial.SerialException as e:
+        print(f"Serial port error: {e}")
+    except KeyboardInterrupt:
+        print("\nProgram terminated by user")
+    finally:
+        if 'ser' in locals():
+            ser.close()
+            print("Serial connection closed")
+
+
+if __name__ == "__main__":
+    print("Starting MPU6050 mouse control with reduced rotation sensitivity...")
+    print("Move mouse to screen corner to activate failsafe stop")
+    main()
